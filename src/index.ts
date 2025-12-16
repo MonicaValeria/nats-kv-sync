@@ -7,8 +7,9 @@ import {
   ConsumerConfig,
   DeliverPolicy,
   AckPolicy,
-  ReplayPolicy, // <--- Importado
-  StorageType, // <--- Importado
+  ReplayPolicy,
+  StorageType,
+  KvEntry,
 } from "nats";
 import minimist from "minimist";
 import { CrdtOperation, KvMetadata } from "./types";
@@ -16,6 +17,9 @@ import { CrdtOperation, KvMetadata } from "./types";
 const argv = minimist(process.argv.slice(2));
 const NATS_URL = argv.url || "nats://localhost:4222";
 const NODE_ID = argv["node-id"] || "unknown-node";
+// Frecuencia de Anti-Entropy en ms (Por defecto 1 minuto para probar, en prod serían 5 min)
+const ENTROPY_INTERVAL = 60000;
+
 const BUCKET_NAME = "config";
 const META_BUCKET_NAME = "config_meta";
 const STREAM_NAME = "REPLICATION";
@@ -30,27 +34,75 @@ async function main() {
   );
 
   const nc = await connect({ servers: NATS_URL });
-
-  // Instancia de cliente (para publicar/suscribir)
   const js = nc.jetstream();
-
-  // Instancia de Manager (para crear streams y admin)
   const jsm = await nc.jetstreamManager();
 
-  // 1. Inicializar Stream de Replicación
+  // 1. Infraestructura
   await ensureStream(jsm);
 
-  // 2. Inicializar Buckets KV (Datos y Metadatos)
+  // 2. Buckets
   const kv = await js.views.kv(BUCKET_NAME, { history: 1 });
   const kvMeta = await js.views.kv(META_BUCKET_NAME, { history: 1 });
 
-  // 3. Iniciar Suscriptor Remoto (Escucha cambios de otros sitios)
+  // 3. Listener Remoto (CRDT Merge)
   startRemoteListener(js, kv, kvMeta);
 
-  // 4. Iniciar Watcher Local (Detecta cambios locales y publica)
+  // 4. Watcher Local (Detectar cambios usuario)
   startLocalWatcher(js, kv, kvMeta);
 
-  console.log(`✅ Agente corriendo. Esperando cambios...`);
+  // 5. Anti-Entropy (NUEVO: Reconciliación periódica)
+  startAntiEntropy(js, kv, kvMeta);
+
+  console.log(
+    `✅ Agente corriendo. Anti-Entropy programado cada ${
+      ENTROPY_INTERVAL / 1000
+    }s`
+  );
+}
+
+// --- Lógica de Anti-Entropy (NUEVO) ---
+function startAntiEntropy(js: JetStreamClient, kv: any, kvMeta: any) {
+  setInterval(async () => {
+    console.log("🔄 [ANTI-ENTROPY] Iniciando ciclo de reconciliación...");
+
+    try {
+      // Iteramos sobre todas las claves del bucket de datos
+      const keys = await kv.keys();
+      let count = 0;
+
+      for await (const key of keys) {
+        // Obtenemos valor y metadatos actuales
+        const entry = await kv.get(key);
+        const metaEntry = await kvMeta.get(key);
+
+        if (!entry || !metaEntry) continue;
+
+        const value = sc.decode(entry.value);
+        const meta = metaEntry.json() as KvMetadata;
+
+        // Construimos la operación con el estado ACTUAL (preservando el timestamp original)
+        const op: CrdtOperation = {
+          op: "PUT", // Asumimos PUT si existe. Si soportamos soft-delete, habría que revisar tombstone.
+          bucket: BUCKET_NAME,
+          key: key,
+          value: value,
+          ts: meta.ts, // IMPORTANTE: Usar el TS original, no Date.now()
+          node_id: meta.node_id,
+        };
+
+        // Re-publicamos al stream.
+        // Si el otro nodo ya lo tiene, lo ignorará por la regla CRDT.
+        // Si no lo tiene, lo aplicará.
+        await js.publish(SUBJECT_NAME, jc.encode(op));
+        count++;
+      }
+      console.log(
+        `🔄 [ANTI-ENTROPY] Ciclo finalizado. ${count} claves verificadas/re-difundidas.`
+      );
+    } catch (err) {
+      console.error("⚠️ Error en ciclo Anti-Entropy:", err);
+    }
+  }, ENTROPY_INTERVAL);
 }
 
 // --- Lógica del Watcher Local ---
@@ -66,7 +118,6 @@ async function startLocalWatcher(js: JetStreamClient, kv: any, kvMeta: any) {
     const opType =
       entry.operation === "DEL" || entry.value === null ? "DEL" : "PUT";
 
-    // LEER METADATOS ACTUALES
     const metaEntry = await kvMeta.get(key);
     let currentMeta: KvMetadata | null = null;
 
@@ -74,18 +125,18 @@ async function startLocalWatcher(js: JetStreamClient, kv: any, kvMeta: any) {
       currentMeta = metaEntry.json() as KvMetadata;
     }
 
-    // Evitar eco
+    // Evitar bucle infinito: Si el cambio coincide con un meta remoto reciente, es un eco.
     if (currentMeta && currentMeta.node_id !== NODE_ID) {
       continue;
     }
 
     const ts = Date.now();
 
-    // 1. Actualizamos meta
+    // Actualizamos meta
     const newMeta: KvMetadata = { ts, node_id: NODE_ID };
     await kvMeta.put(key, jc.encode(newMeta));
 
-    // 2. Publicamos la operación CRDT
+    // Publicamos
     const op: CrdtOperation = {
       op: opType,
       bucket: BUCKET_NAME,
@@ -106,7 +157,7 @@ async function startRemoteListener(js: JetStreamClient, kv: any, kvMeta: any) {
     durable_name: `syncd-${NODE_ID}`,
     ack_policy: AckPolicy.Explicit,
     deliver_policy: DeliverPolicy.All,
-    replay_policy: ReplayPolicy.Instant, // <--- Corrección 1: Agregado replay_policy
+    replay_policy: ReplayPolicy.Instant,
   };
 
   const sub = await js.pullSubscribe(SUBJECT_NAME, { config: consumerOpts });
@@ -116,6 +167,8 @@ async function startRemoteListener(js: JetStreamClient, kv: any, kvMeta: any) {
     for await (const m of sub) {
       const op = jc.decode(m.data) as CrdtOperation;
 
+      // En Anti-Entropy recibiremos nuestros propios mensajes rebotados.
+      // Debemos ignorarlos si el node_id coincide.
       if (op.node_id === NODE_ID) {
         m.ack();
         continue;
@@ -148,7 +201,9 @@ async function startRemoteListener(js: JetStreamClient, kv: any, kvMeta: any) {
           await kv.delete(key);
         }
       } else {
-        console.log(`🛡️ [SYNC IN] Ignorado (Old TS) de ${op.node_id}`);
+        // Esto ocurrirá frecuentemente durante Anti-Entropy (datos ya sincronizados)
+        // No imprimimos log para no ensuciar la consola, o usamos debug
+        // console.log(`🛡️ [SYNC IN] Ignorado (Ya actualizado) de ${op.node_id}`);
       }
 
       m.ack();
@@ -165,7 +220,6 @@ async function startRemoteListener(js: JetStreamClient, kv: any, kvMeta: any) {
   }
 }
 
-// --- Helper ---
 async function ensureStream(jsm: JetStreamManager) {
   try {
     await jsm.streams.info(STREAM_NAME);

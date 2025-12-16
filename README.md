@@ -1,4 +1,9 @@
-#  Documentación del Proyecto: Sincronización KV Distribuida (CRDT LWW con NATS JetStream)
+# Documentación del Proyecto: Sincronización KV Distribuida (CRDT LWW con NATS JetStream)
+
+## Hecho por
+
+* Steven Jose Silva Gomez
+* Monica Valeia Tipe Castro
 
 ## 1. Introducción y Objetivo
 

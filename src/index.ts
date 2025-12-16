@@ -173,7 +173,7 @@ async function ensureStream(jsm: JetStreamManager) {
     await jsm.streams.add({
       name: STREAM_NAME,
       subjects: [SUBJECT_NAME],
-      storage: StorageType.File, // <--- Corrección 2: Uso de Enum StorageType
+      storage: StorageType.File,
     });
     console.log(`stream ${STREAM_NAME} creado.`);
   }

@@ -2,14 +2,38 @@ version: "3.8"
 services:
   nats-a:
     image: nats:latest
-    command: ["-js", "--server_name", "nats-a"]
+    # Nombre del servidor: nats-a
+    # Nombre del cluster: mi-cluster (debe ser igual en ambos)
+    # Puerto cluster: 6222
+    # Rutas: busca al servidor nats-b en su puerto 6222
+    command:
+      - "-js"
+      - "--server_name=nats-a"
+      - "--cluster_name=mi-cluster"
+      - "--cluster=nats://0.0.0.0:6222"
+      - "--routes=nats://nats-b:6222"
+      - "--http_port=8222"
     ports:
       - "4222:4222"
-      - "8222:8222" # Monitorización
+      - "8222:8222"
+    networks:
+      - nats-net
 
   nats-b:
     image: nats:latest
-    command: ["-js", "--server_name", "nats-b"]
+    command:
+      - "-js"
+      - "--server_name=nats-b"
+      - "--cluster_name=mi-cluster"
+      - "--cluster=nats://0.0.0.0:6222"
+      - "--routes=nats://nats-a:6222"
+      - "--http_port=8222"
     ports:
       - "5222:4222"
-      - "9222:8222" # Monitorización
+      - "9222:8222"
+    networks:
+      - nats-net
+
+networks:
+  nats-net:
+    driver: bridge

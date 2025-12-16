@@ -1,0 +1,15 @@
+version: "3.8"
+services:
+  nats-a:
+    image: nats:latest
+    command: ["-js", "--server_name", "nats-a"]
+    ports:
+      - "4222:4222"
+      - "8222:8222" # Monitorización
+
+  nats-b:
+    image: nats:latest
+    command: ["-js", "--server_name", "nats-b"]
+    ports:
+      - "5222:4222"
+      - "9222:8222" # Monitorización

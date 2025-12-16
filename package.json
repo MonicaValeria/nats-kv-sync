@@ -1,0 +1,22 @@
+{
+  "name": "nats-kv-syncd",
+  "version": "1.0.0",
+  "description": "Agente de sincronización KV usando CRDT y NATS",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "ts-node src/index.ts",
+    "start:a": "ts-node src/index.ts --url nats://localhost:4222 --node-id site-a",
+    "start:b": "ts-node src/index.ts --url nats://localhost:5222 --node-id site-b"
+  },
+  "dependencies": {
+    "nats": "^2.19.0",
+    "minimist": "^1.2.8"
+  },
+  "devDependencies": {
+    "ts-node": "^10.9.1",
+    "typescript": "^5.0.0",
+    "@types/node": "^20.0.0",
+    "@types/minimist": "^1.2.2"
+  }
+}
